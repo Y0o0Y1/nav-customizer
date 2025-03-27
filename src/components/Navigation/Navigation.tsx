@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Box, Button, IconButton } from '@mui/material';
+import { Box, IconButton } from '@mui/material';
 import EditIcon from '@mui/icons-material/Edit';
 import SaveIcon from '@mui/icons-material/Save';
 import CloseIcon from '@mui/icons-material/Close';
 import { useGetNavigationQuery, useSaveNavigationMutation, useTrackNavItemMoveMutation } from '@/api/services/navigationApi';
 import { NavItem as NavItemType } from '@/api/DTO/navigation';
 import NavigationItem from './NavigationItem';
-// import { findItemById, moveItem } from './navigationUtils';
-// import { useNoSsr } from '@/hooks/useNoSsr';
+import { findItemById, moveItem } from './navigationUtils';
+import { useNoSsr } from '@/hooks/useNoSsr';
 import dynamic from 'next/dynamic';
 
 export interface NavItemUI extends NavItemType {
@@ -21,18 +21,20 @@ const DndProviderWithBackend = dynamic(() => import('./DndProviderWithBackend'),
 const mapApiToUiModel = (items: NavItemType[]): NavItemUI[] => {
   return items.map(item => ({
     ...item,
-    isExpanded: true,
+    isExpanded: true, // Default to expanded
     children: item.children ? mapApiToUiModel(item.children) : undefined
   }));
 };
 
 const mapUiToApiModel = (items: NavItemUI[]): NavItemType[] => {
   return items.map(item => {
-    const { isExpanded, ...apiItem } = item;
+    // Create a new object without isExpanded property
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { isExpanded, children, ...apiItem } = item;
     
     return {
       ...apiItem,
-      children: item.children ? mapUiToApiModel(item.children) : undefined
+      children: children ? mapUiToApiModel(children) : undefined
     };
   });
 };
@@ -63,12 +65,54 @@ export default function Navigation({ container, className, sx }: NavigationProps
 
   const handleCancelEdit = () => {
     if (data) {
-      setNavItems(mapApiToUiModel(data));
+      // Create a map of item IDs to their current expanded state
+      const expandedStatesMap = new Map<string | number, boolean>();
+      
+      // Function to collect expanded states from current items
+      const collectExpandedStates = (items: NavItemUI[]) => {
+        items.forEach(item => {
+          // Store the expanded state (or true if it's undefined)
+          expandedStatesMap.set(item.id, item.isExpanded !== false);
+          
+          // Process children recursively
+          if (item.children && item.children.length > 0) {
+            collectExpandedStates(item.children);
+          }
+        });
+      };
+      
+      // Collect current expanded states
+      collectExpandedStates(navItems);
+      
+      // Function to apply the saved expanded states to refreshed items
+      const applyExpandedStates = (items: NavItemUI[]): NavItemUI[] => {
+        return items.map(item => {
+          // Create a new item with the saved expanded state
+          const newItem = {...item};
+          
+          // Apply the expanded state if available
+          if (expandedStatesMap.has(item.id)) {
+            newItem.isExpanded = expandedStatesMap.get(item.id);
+          }
+          
+          // Process children recursively
+          if (newItem.children && newItem.children.length > 0) {
+            newItem.children = applyExpandedStates(newItem.children);
+          }
+          
+          return newItem;
+        });
+      };
+      
+      // Map API data to UI model and apply saved expanded states
+      const refreshedItems = applyExpandedStates(mapApiToUiModel(data));
+      setNavItems(refreshedItems);
     }
+    
     setIsEditMode(false);
   };
 
-  const handleEditModeToggle = (itemId: number | string) => {
+  const handleEditModeToggle = () => {
     setIsEditMode(true);
   };
 
@@ -89,7 +133,15 @@ export default function Navigation({ container, className, sx }: NavigationProps
       const item = findItemById(newItems, itemId);
       
       if (item) {
-        item.visible = !item.visible;
+        // Toggle visibility (handle both visible and hidden properties)
+        if (item.visible !== undefined) {
+          item.visible = !item.visible;
+        } else if (item.hidden !== undefined) {
+          item.hidden = !item.hidden;
+        } else {
+          // If neither property exists, set visible to false
+          item.visible = false;
+        }
       }
       
       return newItems;
@@ -111,7 +163,7 @@ export default function Navigation({ container, className, sx }: NavigationProps
 
   const moveNavItem = useCallback((dragId: number | string, hoverId: number | string, position: 'before' | 'after') => {
     setNavItems(prevItems => {
-      return moveItem(prevItems, dragId, hoverId, position);
+      return moveItem(prevItems, dragId, hoverId, position) as NavItemUI[];
     });
   }, []);
 
@@ -119,7 +171,7 @@ export default function Navigation({ container, className, sx }: NavigationProps
     if (!trackNavItemMove) return true;
     
     try {
-      const result = await trackNavItemMove({
+      await trackNavItemMove({
         id: itemId,
         from: fromIndex, 
         to: toIndex
@@ -129,13 +181,14 @@ export default function Navigation({ container, className, sx }: NavigationProps
     } catch (error) {
       console.error('Failed to track item movement:', error);
       
+      // Revert the move if tracking fails
       setNavItems(prevItems => {
         const revertedItems = moveItem(
           prevItems,
           itemId,
           itemId,
           toIndex > fromIndex ? 'before' : 'after'
-        );
+        ) as NavItemUI[];
         return revertedItems;
       });
       
@@ -149,7 +202,7 @@ export default function Navigation({ container, className, sx }: NavigationProps
       const item = findItemById(newItems, itemId);
       
       if (item) {
-        item.isExpanded = !item.isExpanded;
+        (item as NavItemUI).isExpanded = !(item as NavItemUI).isExpanded;
       }
       
       return newItems;
@@ -157,7 +210,7 @@ export default function Navigation({ container, className, sx }: NavigationProps
   }, []);
 
   const renderNavItems = (items: NavItemUI[], level = 0) => {
-    return items.map((item) => (
+    return items.map((item, index) => (
       <NavigationItem
         key={item.id}
         item={item}
@@ -170,8 +223,10 @@ export default function Navigation({ container, className, sx }: NavigationProps
         onEditModeToggle={handleEditModeToggle}
         isExpanded={item.isExpanded !== false}
         onToggleExpand={handleToggleExpand}
+        index={index}
+        items={items}
       >
-        {item.children && item.children.length > 0 && item.isExpanded !== false && (
+        {item.children && item.children.length > 0 && (
           renderNavItems(item.children, level + 1)
         )}
       </NavigationItem>

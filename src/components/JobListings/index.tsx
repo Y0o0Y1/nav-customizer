@@ -120,7 +120,7 @@ const JobListings: React.FC<JobListingsProps> = ({ onMenuOpen }) => {
           mx: { xs: 2, md: 3 },
           my: { xs: 2, md: 3 },
           borderRadius: 1,
-          width: "90%"
+          width: !isMobile ? "100%" : "85%"
         }}>
 
           <Box>

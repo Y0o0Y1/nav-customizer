@@ -19,56 +19,57 @@ import { useDrag, useDrop } from 'react-dnd';
 import { useRouter, usePathname } from 'next/navigation';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import { NavItemUI } from './Navigation';
+import { findItemWithParent } from './navigationUtils';
 
 interface NavigationItemProps {
-  id: string;
-  title: string;
-  url: string;
-  visible: boolean;
-  index: number;
+  item: NavItemUI;
   level: number;
   isEditMode: boolean;
-  hasChildren?: boolean;
+  onToggleVisibility: (id: number | string) => void;
+  onTitleChange: (id: number | string, newTitle: string) => void;
+  moveNavItem: (dragId: number | string, hoverId: number | string, position: 'before' | 'after') => void;
+  onTrackItemMove: (id: number | string, fromIndex: number, toIndex: number) => Promise<boolean>;
+  onEditModeToggle: () => void;
   isExpanded: boolean;
-  onDrop: (id: string, from: number, to: number, level: number) => void;
-  onVisibilityToggle: (id: string) => void;
-  onTitleChange: (id: string, newTitle: string) => void;
-  onToggleExpand: (id: string) => void;
-  moveItem: (dragIndex: number, hoverIndex: number, level: number) => void;
-  onEditModeToggle?: (id: string) => void;
+  onToggleExpand: (id: number | string) => void;
+  children?: React.ReactNode;
+  index?: number;
+  items?: NavItemUI[];
 }
 
 interface DragItem {
-  id: string;
+  id: number | string;
   index: number;
   level: number;
   type: string;
 }
 
 const NavigationItem: React.FC<NavigationItemProps> = ({
-  id,
-  title,
-  url,
-  visible,
-  index,
+  item,
   level,
   isEditMode,
-  hasChildren,
-  isExpanded,
-  onDrop,
-  onVisibilityToggle,
+  onToggleVisibility,
   onTitleChange,
+  moveNavItem,
+  onTrackItemMove,
+  onEditModeToggle,
+  isExpanded,
   onToggleExpand,
-  moveItem,
-  onEditModeToggle
+  children,
+  index = 0,
+  items = []
 }) => {
+  const { id, title, target, url, visible, hidden } = item;
+  const isVisible = visible === undefined ? !hidden : visible;
+  
   const [isEditing, setIsEditing] = useState(false);
   const [newTitle, setNewTitle] = useState(title);
   const [touchStartTime, setTouchStartTime] = useState<number | null>(null);
   const [touchPos, setTouchPos] = useState({ x: 0, y: 0 });
   const [isDraggingTouch, setIsDraggingTouch] = useState(false);
   const [dropPosition, setDropPosition] = useState<'top' | 'bottom' | null>(null);
-  const [longPressTimer, setLongPressTimer] = useState<NodeJS.Timeout | null>(null);
+  const [longPressTimer, setLongPressTimer] = useState<ReturnType<typeof setTimeout> | null>(null);
   const [longPressProgress, setLongPressProgress] = useState(0);
   const [isLongPressing, setIsLongPressing] = useState(false);
   const longPressAnimationRef = useRef<number | null>(null);
@@ -76,37 +77,34 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
   const ref = useRef<HTMLDivElement>(null);
   const router = useRouter();
   const pathname = usePathname();
-  const isActive = pathname === url;
+  const hasChildren = item.children && item.children.length > 0;
 
   const [{ isDragging }, drag] = useDrag<DragItem, unknown, { isDragging: boolean }>({
     type: 'NAV_ITEM',
-    item: { id, index, level, type: 'NAV_ITEM' },
+    item: { id, level, index, type: 'NAV_ITEM' },
     collect: (monitor) => ({
       isDragging: monitor.isDragging()
     }),
     canDrag: () => isEditMode
   });
 
-  const [{ isOver }, drop] = useDrop<DragItem, unknown, { isOver: boolean }>({
+  const [{ isOver, canDrop }, drop] = useDrop<DragItem, unknown, { isOver: boolean, canDrop: boolean }>({
     accept: 'NAV_ITEM',
     collect: (monitor) => ({
-      isOver: monitor.isOver()
+      isOver: monitor.isOver(),
+      canDrop: monitor.canDrop()
     }),
-    hover: (item, monitor) => {
+    canDrop: (dragItem) => {
+      // Only check that we're not dropping onto itself
+      return dragItem.id !== id;
+    },
+    hover: (dragItem, monitor) => {
       if (!ref.current) {
         return;
       }
-      const dragIndex = item.index;
-      const hoverIndex = index;
-      const dragLevel = item.level;
-
+      
       // Don't replace items with themselves
-      if (dragIndex === hoverIndex) {
-        return;
-      }
-
-      // Only allow items at the same level
-      if (dragLevel !== level) {
+      if (dragItem.id === id) {
         return;
       }
 
@@ -132,33 +130,26 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
       } else {
         setDropPosition('bottom');
       }
-
-      // Only perform the move when the mouse has crossed half of the items height
-      // When dragging downwards, only move when the cursor is below 50%
-      // When dragging upwards, only move when the cursor is above 50%
-      if (dragIndex < hoverIndex && hoverClientY < hoverMiddleY) {
+    },
+    drop: (dragItem) => {
+      if (dragItem.id === id) {
         return;
       }
-      if (dragIndex > hoverIndex && hoverClientY > hoverMiddleY) {
-        return;
+      
+      // Calculate position to place the dragged item
+      if (dropPosition === 'top') {
+        moveNavItem(dragItem.id, id, 'before');
+      } else {
+        moveNavItem(dragItem.id, id, 'after');
       }
 
-      // Time to actually perform the action
-      moveItem(dragIndex, hoverIndex, level);
-
-      // Note: we're mutating the monitor item here!
-      // Generally it's better to avoid mutations,
-      // but it's good here for the sake of performance
-      // to avoid expensive index searches.
-      item.index = hoverIndex;
-    },
-    canDrop: (item) => {
-      return item.level === level && item.id !== id;
-    },
-    drop: (item) => {
-      if (item.id !== id) {
-        onDrop(item.id, item.index, index, level);
-      }
+      // Track the move with the server
+      const fromIndex = dragItem.index;
+      const toIndex = dropPosition === 'top' ? index : index + 1;
+      
+      onTrackItemMove(dragItem.id, fromIndex, toIndex);
+      
+      // Reset drop position indicator
       setDropPosition(null);
     }
   });
@@ -172,13 +163,24 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
 
   // Initialize the refs
   useEffect(() => {
-    drag(drop(ref.current));
-  }, [drag, drop]);
+    // Properly connect drag and drop to handle nested items
+    if (ref.current) {
+      drag(drop(ref.current));
+    }
+  }, [drag, drop, ref]);
+  
+  // Make sure children are correctly expanded in edit mode
+  useEffect(() => {
+    if (hasChildren && item.isExpanded !== isExpanded) {
+      // Sync the internal expanded state with the item's state
+      onToggleExpand(id);
+    }
+  }, [hasChildren, id, isExpanded, item.isExpanded, onToggleExpand]);
 
   // Handle long press to enter edit mode
   const handleLongPress = () => {
     if (onEditModeToggle) {
-      onEditModeToggle(id);
+      onEditModeToggle();
     }
   };
 
@@ -235,11 +237,11 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
         }
         e.stopPropagation();
       }
-    } else if (visible) { // Only initiate long press on visible items
+    } else if (isVisible) { // Only initiate long press on visible items
       // Try to prevent default to help with iOS Safari
       try {
         e.preventDefault();
-      } catch (err) {
+      } catch (_) {
         // Ignore errors from browsers that don't allow preventDefault
       }
       
@@ -303,7 +305,7 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
 
   // Mouse events for desktop long press
   const handleMouseDown = () => {
-    if (!isEditMode && visible) { // Only initiate long press on visible items
+    if (!isEditMode && isVisible) { // Only initiate long press on visible items
       longPressStartTimeRef.current = Date.now();
       setIsLongPressing(true);
       longPressAnimationRef.current = requestAnimationFrame(updateLongPressProgress);
@@ -327,17 +329,34 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
   };
 
   const handleEdit = () => {
-    setIsEditing(true);
+    // Only proceed if we're in edit mode
+    if (isEditMode) {
+      // Reset title to current value when starting to edit
+      setNewTitle(title);
+      // Enter editing state - force it to true
+      setIsEditing(true);
+      
+      // Use a small timeout to ensure the text field gets focus
+      setTimeout(() => {
+        const inputElement = document.querySelector(`[data-item-id="${id}"] input`);
+        if (inputElement instanceof HTMLInputElement) {
+          inputElement.focus();
+          inputElement.select();
+        }
+      }, 50);
+    }
   };
 
   const handleSaveTitle = () => {
-    console.log("Saving title:", newTitle);
-    onTitleChange(id, newTitle);
+    // Only save if the title has actually changed
+    if (newTitle !== title && newTitle.trim()) {
+      onTitleChange(id, newTitle.trim());
+    }
     setIsEditing(false);
-    console.log("isEditing set to false");
   };
 
   const handleCancelEdit = () => {
+    // Reset to original title
     setNewTitle(title);
     setIsEditing(false);
   };
@@ -357,12 +376,24 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
     }
   }, [title, isEditing]);
 
-  const handleClick = () => {
-    if (isEditMode) return;
+  const handleClick = (e: React.MouseEvent) => {
+    if (isEditMode) {
+      // In edit mode, only allow toggling dropdown when clicking directly on the item
+      // (not on the expand icon, as that has its own handler)
+      if (hasChildren && !(e.target as HTMLElement).closest('button')) {
+        onToggleExpand(id);
+      }
+      return;
+    }
+    
     if (hasChildren) {
       onToggleExpand(id);
-    } else if (url && visible) {
-      router.push(url);
+    } else if ((url || target) && isVisible) {
+      if (url) {
+        router.push(url);
+      } else if (target) {
+        router.push(target);
+      }
     }
   };
 
@@ -371,6 +402,21 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
     if (isEditMode) {
       e.stopPropagation();
       handleEdit();
+    }
+  };
+
+  // Function to handle title double click
+  const handleTitleDoubleClick = (e: React.MouseEvent) => {
+    // Allow double click to edit even in view mode
+    if (!isEditMode) {
+      // Prevent bubbling to other handlers
+      e.stopPropagation();
+      // Toggle edit mode first, then enable title editing
+      onEditModeToggle();
+      // Use setTimeout to ensure edit mode is active before enabling title editing
+      setTimeout(() => {
+        setIsEditing(true);
+      }, 100);
     }
   };
 
@@ -392,8 +438,8 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
     <Box
       ref={ref}
       sx={{
-        opacity: isDraggingAny ? 0.7 : (visible || isEditMode ? 1 : 0.6),
-        cursor: isEditMode ? 'move' : (visible ? 'pointer' : 'default'),
+        opacity: isDraggingAny ? 0.7 : (isVisible || isEditMode ? 1 : 0.6),
+        cursor: isEditMode ? 'move' : (isVisible ? 'pointer' : 'default'),
         backgroundColor: isOver ? 'rgba(25, 118, 210, 0.08)' : longPressBackgroundColor,
         '& .MuiTypography-root': {
           textDecoration: 'inherit'
@@ -516,13 +562,19 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
             <Stack direction="row" spacing={1}>
               <IconButton 
                 edge="end" 
-                onClick={handleEdit} 
+                onClick={(e) => {
+                  e.stopPropagation(); // Prevent event bubbling
+                  handleEdit();
+                }} 
                 size="small"
+                title="Edit title"
                 sx={{ 
                   p: 0.75,
-                  color: 'rgba(0, 0, 0, 0.54)',
+                  color: isEditing ? 'primary.main' : 'rgba(0, 0, 0, 0.54)',
+                  backgroundColor: isEditing ? 'rgba(25, 118, 210, 0.08)' : 'transparent',
                   '&:hover': {
-                    color: '#1976d2'
+                    color: '#1976d2',
+                    backgroundColor: 'rgba(25, 118, 210, 0.12)'
                   }
                 }}
               >
@@ -530,17 +582,18 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
               </IconButton>
               <IconButton 
                 edge="end" 
-                onClick={() => onVisibilityToggle(id)} 
+                onClick={() => onToggleVisibility(id)} 
                 size="small"
+                title={isVisible ? "Hide item" : "Show item"}
                 sx={{ 
                   p: 0.75,
-                  color: visible ? 'rgba(0, 0, 0, 0.54)' : 'rgba(0, 0, 0, 0.26)',
+                  color: isVisible ? 'rgba(0, 0, 0, 0.54)' : 'rgba(0, 0, 0, 0.26)',
                   '&:hover': {
-                    color: visible ? '#1976d2' : 'rgba(0, 0, 0, 0.54)'
+                    color: isVisible ? '#1976d2' : 'rgba(0, 0, 0, 0.54)'
                   }
                 }}
               >
-                {visible ? <VisibilityIcon sx={{ fontSize: 20 }} /> : <VisibilityOffIcon sx={{ fontSize: 20 }} />}
+                {isVisible ? <VisibilityIcon sx={{ fontSize: 20 }} /> : <VisibilityOffIcon sx={{ fontSize: 20 }} />}
               </IconButton>
             </Stack>
           )
@@ -548,22 +601,25 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
       >
         <ListItemButton
           onClick={handleClick}
-          disableRipple={isEditMode}
+          disableRipple={isEditMode && !hasChildren}
           sx={{
             pl: 1,
             py: 1.5,
-            opacity: visible ? 1 : 0.5,
+            opacity: isVisible ? 1 : 0.5,
             '&:hover': {
-              backgroundColor: isEditMode || !visible ? 'transparent' : 'rgba(0, 0, 0, 0.04)',
+              backgroundColor: isEditMode && !hasChildren ? 'transparent' : 'rgba(0, 0, 0, 0.04)',
             },
-            cursor: visible ? (isEditMode ? 'move' : 'pointer') : 'default',
+            cursor: isEditMode 
+              ? (hasChildren ? 'pointer' : 'move') 
+              : (isVisible ? 'pointer' : 'default'),
             textDecoration: 'none',
             position: 'relative'
           }}
         >
           {isEditMode && (
-            <ListItemIcon 
+            <Box 
               className="drag-handle"
+              component={ListItemIcon}
               sx={{ 
                 minWidth: 32,
                 color: 'rgba(0, 0, 0, 0.54)',
@@ -584,65 +640,186 @@ const NavigationItem: React.FC<NavigationItemProps> = ({
             >
               <DragIndicatorIcon />
               <DragIndicatorIcon style={{ marginLeft: -16 }} />
-            </ListItemIcon>
+            </Box>
           )}
           
           {isEditing ? (
-            <TextField
-              fullWidth
-              value={newTitle}
-              onChange={(e) => setNewTitle(e.target.value)}
-              variant="standard"
-              autoFocus
-              onClick={(e) => e.stopPropagation()}
-              onBlur={handleSaveTitle}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  handleSaveTitle();
-                } else if (e.key === 'Escape') {
-                  handleCancelEdit();
-                }
+            <Box
+              data-item-id={id}
+              sx={{
+                ml: !isEditMode && hasChildren ? 0 : 2,
+                position: 'relative',
+                width: '100%',
               }}
-              sx={{ ml: !isEditMode && hasChildren ? 0 : 2, '& .MuiInputBase-root': { textDecoration: 'none' } }}
-            />
+              onClick={(e) => e.stopPropagation()}
+            >
+              <TextField
+                fullWidth
+                value={newTitle}
+                onChange={(e) => setNewTitle(e.target.value)}
+                variant="standard"
+                autoFocus
+                placeholder="Enter title"
+                size="small"
+                onBlur={handleSaveTitle}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleSaveTitle();
+                  } else if (e.key === 'Escape') {
+                    handleCancelEdit();
+                  }
+                }}
+                InputProps={{
+                  endAdornment: (
+                    <Box sx={{ display: 'flex', gap: 0.5 }}>
+                      <IconButton 
+                        size="small" 
+                        onClick={handleSaveTitle}
+                        sx={{ 
+                          color: 'success.main',
+                          p: 0.5,
+                          fontSize: '0.75rem'
+                        }}
+                      >
+                        ✓
+                      </IconButton>
+                      <IconButton 
+                        size="small" 
+                        onClick={handleCancelEdit}
+                        sx={{ 
+                          color: 'error.main',
+                          p: 0.5,
+                          fontSize: '0.75rem'
+                        }}
+                      >
+                        ✕
+                      </IconButton>
+                    </Box>
+                  )
+                }}
+                sx={{ 
+                  '& .MuiInputBase-root': { 
+                    fontSize: '0.875rem',
+                    textDecoration: 'none',
+                    backgroundColor: 'rgba(0, 0, 0, 0.03)',
+                    borderRadius: '4px',
+                    pl: 1,
+                    pr: 0.5,
+                    py: 0.5,
+                    transition: 'all 0.2s ease'
+                  },
+                  '& .MuiInput-underline:before': { 
+                    borderBottomColor: 'rgba(0, 0, 0, 0.1)' 
+                  },
+                  '& .MuiInput-underline:hover:not(.Mui-disabled):before': { 
+                    borderBottomColor: 'primary.main'
+                  }
+                }}
+              />
+            </Box>
           ) : (
             <Typography
               sx={{
                 ml: !isEditMode && hasChildren ? 0 : 2,
                 fontWeight: 400,
                 fontSize: '0.875rem',
-                color: visible ? 'rgba(0, 0, 0, 0.87)' : 'rgba(0, 0, 0, 0.38)',
+                color: isVisible ? 'rgba(0, 0, 0, 0.87)' : 'rgba(0, 0, 0, 0.38)',
                 lineHeight: 1.5,
-                cursor: isEditMode ? 'default' : (visible ? 'pointer' : 'not-allowed'),
-                textDecoration: (!visible && !isEditMode) ? 'line-through' : 'none',
+                cursor: isEditMode ? 'text' : (isVisible ? 'pointer' : 'not-allowed'),
+                textDecoration: (!isVisible && !isEditMode) ? 'line-through' : 'none',
                 textDecorationColor: 'rgba(0, 0, 0, 0.2)',
                 textDecorationThickness: '1px',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
-                maxWidth: isEditMode ? 'calc(100% - 100px)' : '100%' // Account for action buttons
+                maxWidth: isEditMode ? 'calc(100% - 100px)' : '100%', // Account for action buttons
+                position: 'relative',
+                // Add visual indicator for edit mode
+                '&:after': isEditMode ? {
+                  content: '""',
+                  position: 'absolute',
+                  bottom: -2,
+                  left: 0,
+                  right: 0,
+                  height: '1px',
+                  backgroundColor: 'rgba(0, 0, 0, 0.2)',
+                } : {},
+                // Add hover effect in edit mode
+                '&:hover': isEditMode ? {
+                  backgroundColor: 'rgba(0, 0, 0, 0.04)',
+                  color: '#1976d2',
+                } : {}
               }}
-              onClick={isEditMode ? undefined : handleClick}
+              onClick={handleTitleClick}
+              onDoubleClick={handleTitleDoubleClick}
             >
               {title}
+              {isEditMode && (
+                <Box 
+                  component="span" 
+                  sx={{ 
+                    ml: 0.5, 
+                    fontSize: '0.7rem', 
+                    color: 'rgba(0, 0, 0, 0.4)',
+                    fontStyle: 'italic'
+                  }}
+                >
+                  (click to edit)
+                </Box>
+              )}
             </Typography>
           )}
           
-          {!isEditMode && hasChildren && (
-            <ListItemIcon sx={{ minWidth: 'auto', ml: 1 }}>
+          {/* Show expand icons in both edit and non-edit mode */}
+          {hasChildren && (
+            <Box
+              component={IconButton}
+              onClick={(e) => {
+                // Stop propagation to prevent the ListItemButton's click handler from firing
+                e.stopPropagation();
+                // Toggle expand/collapse
+                onToggleExpand(id);
+              }}
+              sx={{ 
+                minWidth: 'auto', 
+                ml: 1,
+                p: 0.5,
+                // Make sure it's clickable in edit mode
+                pointerEvents: 'auto',
+                // Ensure it stays above other elements
+                zIndex: 10,
+                cursor: 'pointer',
+                borderRadius: '50%',
+                '&:hover': {
+                  backgroundColor: 'rgba(0,0,0,0.04)'
+                }
+              }}
+            >
               {isExpanded ? (
-                <ExpandLessIcon sx={{ fontSize: 20, color: 'rgba(0, 0, 0, 0.54)' }} />
+                <ExpandLessIcon 
+                  sx={{ 
+                    fontSize: 20, 
+                    color: 'rgba(0, 0, 0, 0.54)',
+                    '&:hover': { color: '#1976d2' }
+                  }} 
+                />
               ) : (
-                <ExpandMoreIcon sx={{ fontSize: 20, color: 'rgba(0, 0, 0, 0.54)' }} />
+                <ExpandMoreIcon 
+                  sx={{ 
+                    fontSize: 20, 
+                    color: 'rgba(0, 0, 0, 0.54)',
+                    '&:hover': { color: '#1976d2' }
+                  }} 
+                />
               )}
-            </ListItemIcon>
+            </Box>
           )}
         </ListItemButton>
       </ListItem>
       {hasChildren && (
-        <Collapse in={isExpanded} timeout="auto" unmountOnExit>
+        <Collapse in={isExpanded} timeout="auto">
           <Box sx={{ pl: 2 }}>
-            {/* Children will be rendered here by the parent component */}
+            {children}
           </Box>
         </Collapse>
       )}

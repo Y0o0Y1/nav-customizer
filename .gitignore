@@ -45,3 +45,5 @@ localization-script.js
 
 # Sentry Config File
 .env.sentry-build-plugin
+/.next/
+/.next/

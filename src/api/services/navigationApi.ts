@@ -64,6 +64,20 @@ const mockNavItems: NavItem[] = [
   }
 ];
 
+// Track changes to the mock data
+let currentNavItems = [...mockNavItems];
+
+// Utility function to find and move an item in the current navigation state
+const moveItemInArray = (array: NavItem[], fromIndex: number, toIndex: number) => {
+  if (fromIndex === toIndex) return array;
+  
+  const newArray = [...array];
+  const [removed] = newArray.splice(fromIndex, 1);
+  newArray.splice(toIndex, 0, removed);
+  
+  return newArray;
+};
+
 export const navigationApi = createApi({
     reducerPath: 'navigationApi',
     baseQuery: axiosBaseQuery({ baseUrl: 'http://localhost:8081' }),
@@ -74,7 +88,8 @@ export const navigationApi = createApi({
                 url: '/nav',
                 method: 'GET',
             }),
-            transformResponse: () => mockNavItems,
+            // Return the current state of the mock data
+            transformResponse: () => currentNavItems,
             providesTags: ['Navigation'],
         }),
         saveNavigation: builder.mutation<void, NavItem[]>({
@@ -83,6 +98,16 @@ export const navigationApi = createApi({
                 method: 'POST',
                 data: navItems,
             }),
+            // Update the mock data
+            onQueryStarted: async (navItems, { queryFulfilled }) => {
+                try {
+                    await queryFulfilled;
+                    // Update the mock data
+                    currentNavItems = [...navItems];
+                } catch (error) {
+                    console.error('Failed to save navigation:', error);
+                }
+            },
             invalidatesTags: ['Navigation'],
         }),
         trackNavItemMove: builder.mutation<void, TrackNavItemRequest>({
@@ -91,6 +116,44 @@ export const navigationApi = createApi({
                 method: 'POST',
                 data: trackData,
             }),
+            // Update the mock data when item is moved
+            onQueryStarted: async (trackData, { queryFulfilled, dispatch }) => {
+                try {
+                    await queryFulfilled;
+                    
+                    if (trackData.from !== null && trackData.to !== null) {
+                        // This is a simplification - in a real app you would need more complex logic
+                        // to handle nested structures and correctly identify parent containers
+                        const parentId = trackData.parentId;
+                        
+                        // Update currentNavItems based on the move
+                        if (parentId) {
+                            // Find the parent item
+                            const parent = currentNavItems.find(item => item.id === parentId);
+                            if (parent && parent.children) {
+                                // Move the item within the parent's children
+                                parent.children = moveItemInArray(
+                                    parent.children,
+                                    trackData.from,
+                                    trackData.to
+                                );
+                            }
+                        } else {
+                            // Move at the root level
+                            currentNavItems = moveItemInArray(
+                                currentNavItems,
+                                trackData.from,
+                                trackData.to
+                            );
+                        }
+                        
+                        // Invalidate the cache to refresh the UI
+                        dispatch(navigationApi.util.invalidateTags(['Navigation']));
+                    }
+                } catch (error) {
+                    console.error('Failed to track item movement:', error);
+                }
+            },
         }),
     }),
 })
