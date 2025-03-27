@@ -1,0 +1,9 @@
+{
+  "components/Navigation/Navigation.tsx -> ./DndProviderWithBackend": {
+    "id": 8298,
+    "files": [
+      "static/chunks/753.3df6c0249c717ae6.js",
+      "static/chunks/298.d506abd48e2d0abd.js"
+    ]
+  }
+}
